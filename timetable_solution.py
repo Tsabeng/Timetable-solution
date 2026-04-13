@@ -1,86 +1,77 @@
 """
 =============================================================================
-TIMETABLE GENERATION SYSTEM - Department of Computer Science, University of Yaoundé I
+TIMETABLE GENERATION SYSTEM
+Department of Computer Science, University of Yaoundé I
 =============================================================================
 
 MATHEMATICAL MODEL
 ==================
 
 SETS:
-  - C  : set of classes (groups of students per level/semester)
-  - S  : set of subjects (courses)
-  - T  : set of teachers (Course Lecturers)
-  - R  : set of rooms (classrooms)
-  - D  : set of days     D = {0..5}  (Monday=0 to Saturday=5)
-  - P  : set of periods  P = {0..4}
-        period 0: 07:00-09:55
-        period 1: 10:05-12:55
-        period 2: 13:05-15:55
-        period 3: 16:05-18:55
-        period 4: 19:05-21:55
+  C  = set of classes  (one per level/semester, e.g. L1_S1, L2_S2 …)
+  S  = set of subjects (courses)
+  T  = set of teachers
+  R  = set of rooms
+  D  = {0,…,5}   days     (Monday=0 … Saturday=5)
+  P  = {0,…,4}   periods
+        P0: 07:00-09:55  P1: 10:05-12:55  P2: 13:05-15:55
+        P3: 16:05-18:55  P4: 19:05-21:55
 
 PARAMETERS:
-  - curriculum[c][s]  : 1 if course s belongs to the curriculum of class c, else 0
-  - teacher[c][s]     : teacher assigned to course s of class c
-  - w[p]              : weight of period p  (w[0]=5, w[1]=4, w[2]=3, w[3]=2, w[4]=1)
-                        earlier periods have higher weight => optimizer favors mornings
+  curriculum[c][s] ∈ {0,1}   1 if s is in the curriculum of class c
+  teacher(c,s)  ∈ T          lecturer assigned to course s of class c
+  w[p] ∈ ℕ+                  period weight  w[0]=5 > w[1]=4 > w[2]=3 > w[3]=2 > w[4]=1
 
 DECISION VARIABLE:
-  x[c, s, r, d, p] in {0, 1}
-    = 1  if class c takes course s in room r on day d at period p
-    = 0  otherwise
+  x[c,s,r,d,p] ∈ {0,1}
+    = 1  iff class c takes course s in room r on day d at period p
 
-OBJECTIVE FUNCTION:
-  Maximize  Z = SUM_{c,s,r,d,p}  w[p] * x[c, s, r, d, p]
-  (maximizes sessions before noon since P0 and P1 carry weights 5 and 4)
+OBJECTIVE:
+  Maximise  Z = Σ w[p]·x[c,s,r,d,p]
+  (Periods 0 & 1 are before noon and carry the highest weights,
+   so the solver naturally packs sessions into the morning.)
 
 CONSTRAINTS:
-  C1 - No class double-booked at the same slot:
-       for all c,d,p :  SUM_{s,r} x[c,s,r,d,p] <= 1
+  C1  No class double-booked at the same slot
+        ∀c,d,p : Σ_{s,r} x[c,s,r,d,p] ≤ 1
 
-  C2 - Each course of a class scheduled exactly once per week:
-       for all c, s in curriculum(c) :  SUM_{r,d,p} x[c,s,r,d,p] = 1
+  C2  Every course of a class appears exactly once per week
+        ∀c, ∀s∈curriculum(c) : Σ_{r,d,p} x[c,s,r,d,p] = 1
 
-  C3 - Class only takes courses from its curriculum (implicit):
-       variables x[c,s,...] created only when s in curriculum(c)
+  C3  A class only takes its own courses  (implicit: variables created
+        only for s ∈ curriculum(c), no explicit constraint needed)
 
-  C4 - No room double-booked at the same slot:
-       for all r,d,p :  SUM_{c,s} x[c,s,r,d,p] <= 1
+  C4  No room is used by two classes at the same slot
+        ∀r,d,p : Σ_{c,s} x[c,s,r,d,p] ≤ 1
 
-  C5 - No teacher double-booked at the same slot (same semester only):
-       Teachers can teach in different semesters (S1 vs S2) concurrently
-       since those semesters do not run simultaneously.
-       for all t, for all pairs (c1,s1),(c2,s2) where teacher(c1,s1)=teacher(c2,s2)
-                  AND same_semester(c1,c2), for all d,p :
-           SUM_{r} x[c1,s1,r,d,p] + SUM_{r} x[c2,s2,r,d,p] <= 1
-
+  C5  No teacher teaches two different sessions at the same slot,
+        restricted to classes that run in the SAME semester
+        (S1 and S2 run at different times of the academic year)
+        ∀t∈T, ∀d,p :
+          Σ_{(c,s): teacher(c,s)=t, same_sem group, r} x[c,s,r,d,p] ≤ 1
 =============================================================================
 """
 
-import json
-import os
-import sys
+import json, os, sys
 from ortools.sat.python import cp_model
 from collections import defaultdict
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. LOAD DATA FROM JSON FILES
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# 1.  LOAD DATA FROM JSON FILES
+# ─────────────────────────────────────────────────────────────────
 
-def find_file(filename):
-    """Search for a file next to this script or in a 'data/' subfolder."""
+def find_file(name):
     candidates = [
-        filename,
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), filename),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", filename),
+        name,
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), name),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", name),
     ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
+    for p in candidates:
+        if os.path.exists(p):
+            return p
     raise FileNotFoundError(
-        f"\n[ERROR] '{filename}' not found.\n"
-        f"Place rooms.json and subjects.json in the same folder as this script.\n"
-        f"Searched:\n" + "\n".join(f"  {p}" for p in candidates)
+        f"'{name}' not found. Put rooms.json and subjects.json "
+        f"in the same folder as this script.\nSearched: {candidates}"
     )
 
 print("=" * 65)
@@ -88,297 +79,250 @@ print("  TIMETABLE GENERATOR")
 print("  Universite de Yaounde I  -  Departement Informatique")
 print("=" * 65)
 
-# ── rooms.json ────────────────────────────────────────────────────
-rooms_path = find_file("rooms.json")
-with open(rooms_path, encoding="utf-8") as f:
+# ── rooms.json ───────────────────────────────────────────────────
+with open(find_file("rooms.json"), encoding="utf-8") as f:
     rooms_raw = json.load(f)
 
 rooms_list = rooms_raw.get("Informatique", [])
 if not rooms_list:
-    sys.exit("[ERROR] Key 'Informatique' not found or empty in rooms.json")
+    sys.exit("[ERROR] No rooms found under 'Informatique' in rooms.json")
 
 rooms = [r["num"] for r in rooms_list]
-room_capacity = {r["num"]: int(r["capacite"]) for r in rooms_list}
-
-print(f"\n[rooms.json]    {len(rooms)} rooms loaded from '{rooms_path}'")
+print(f"\n[rooms.json]  {len(rooms)} rooms loaded")
 for r in rooms_list:
-    print(f"   {r['num']:<8}  capacity={r['capacite']:<5}  building={r['batiment']}")
+    print(f"   {r['num']:<8}  cap={r['capacite']:<5}  {r['batiment']}")
 
-# ── subjects.json ─────────────────────────────────────────────────
-subjects_path = find_file("subjects.json")
-with open(subjects_path, encoding="utf-8") as f:
+# ── subjects.json ────────────────────────────────────────────────
+with open(find_file("subjects.json"), encoding="utf-8") as f:
     subjects_raw = json.load(f)
 
 niveaux = subjects_raw.get("niveau", {})
 if not niveaux:
     sys.exit("[ERROR] Key 'niveau' not found in subjects.json")
 
-# Build all_classes[class_id] = list of {code, name, teacher}
-# Key fix: courses with no lecturer get a UNIQUE teacher ID so they
-# never conflict with each other under C5.
-all_classes  = {}
-unknown_count = 0
+_unknown_ctr = 0
 
-for level_key, semesters in niveaux.items():
+def make_teacher(lecturers):
+    """Build a teacher label; return a unique placeholder when unknown."""
+    global _unknown_ctr
+    label = "_".join(p.strip() for p in (lecturers or []) if p.strip())
+    if not label:
+        _unknown_ctr += 1
+        return f"__TBD_{_unknown_ctr}__"  
+    return label
+
+all_classes = {}   
+
+for lvl, semesters in niveaux.items():
     for sem_key, sem_data in semesters.items():
-        raw_subjects = sem_data.get("subjects", [])
+        seen_codes = set()      
         valid = []
-        for subj in raw_subjects:
+        for subj in sem_data.get("subjects", []):
             code = subj.get("code", "").strip()
             if not code:
                 continue
+
+            if code in seen_codes:
+                print(f"  [WARN] Duplicate code '{code}' in L{lvl}_{sem_key.upper()} "
+                      f"– keeping first occurrence only")
+                continue
+            seen_codes.add(code)
 
             name = subj.get("name", "")
             if isinstance(name, list):
                 name = " ".join(name).strip()
             name = name.strip() or code
 
-            lecturers = subj.get("Course Lecturer", ["", ""])
-            teacher_label = "_".join(p.strip() for p in lecturers if p.strip())
+            teacher = make_teacher(subj.get("Course Lecturer"))
 
-            # If no teacher info, assign a unique placeholder so the course
-            # never blocks another course under C5
-            if not teacher_label:
-                unknown_count += 1
-                teacher_label = f"__UNKNOWN_{unknown_count}__"
-
-            valid.append({
-                "code":    code,
-                "name":    name,
-                "teacher": teacher_label,
-                "credit":  subj.get("credit", 3),
-            })
+            valid.append({"code": code, "name": name, "teacher": teacher})
 
         if valid:
-            sem_num = "1" if sem_key.lower() in ("s1",) else "2"
-            class_id = f"L{level_key}_S{sem_num}"
+            sem_num  = "1" if sem_key.lower() == "s1" else "2"
+            class_id = f"L{lvl}_S{sem_num}"
             all_classes[class_id] = valid
 
 if not all_classes:
     sys.exit("[ERROR] No valid classes found in subjects.json")
 
-print(f"\n[subjects.json] {len(all_classes)} classes loaded from '{subjects_path}'")
+print(f"\n[subjects.json]  {len(all_classes)} classes loaded")
 for cid in sorted(all_classes.keys()):
     print(f"   {cid:<10}  {len(all_classes[cid])} courses")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# 2.  CONSTANTS
+# ─────────────────────────────────────────────────────────────────
 
-DAYS    = list(range(6))   # 0=Mon .. 5=Sat
-PERIODS = list(range(5))   # 0=07h .. 4=19h
-
+DAYS    = list(range(6))
+PERIODS = list(range(5))
 PERIOD_NAMES = {
-    0: "07:00-09:55",
-    1: "10:05-12:55",
-    2: "13:05-15:55",
-    3: "16:05-18:55",
-    4: "19:05-21:55",
+    0: "07:00-09:55", 1: "10:05-12:55", 2: "13:05-15:55",
+    3: "16:05-18:55", 4: "19:05-21:55",
 }
-DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+DAY_NAMES = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"]
+WEIGHTS   = {0:5, 1:4, 2:3, 3:2, 4:1}
 
-# Higher weight = earlier period => optimizer fills mornings first
-WEIGHTS = {0: 5, 1: 4, 2: 3, 3: 2, 4: 1}
+# ─────────────────────────────────────────────────────────────────
+# 3.  INDEX HELPERS
+# ─────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. INDEX STRUCTURES
-# ─────────────────────────────────────────────────────────────────────────────
-
-classes = sorted(all_classes.keys())
-
-# subjects_of[class_id] = [code, ...]
+classes     = sorted(all_classes.keys())
 subjects_of = {c: [s["code"] for s in all_classes[c]] for c in classes}
+teacher_of  = {(c, s["code"]): s["teacher"]
+               for c in classes for s in all_classes[c]}
 
-# teacher_of[(class_id, code)] = teacher_label
-teacher_of = {}
-for c in classes:
-    for s in all_classes[c]:
-        teacher_of[(c, s["code"])] = s["teacher"]
+def semester(class_id):
+    return class_id.split("_")[1]   # "L1_S1" → "S1"
 
-# semester of a class: "S1" or "S2"
-def get_semester(class_id):
-    return class_id.split("_")[1]   # e.g. "L1_S1" -> "S1"
+# ─────────────────────────────────────────────────────────────────
+# 4.  BUILD THE CP-SAT MODEL
+# ─────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. BUILD THE CP-SAT MODEL
-# ─────────────────────────────────────────────────────────────────────────────
+print("\n" + "-"*65)
+print("  Building CP-SAT model …")
 
-print("\n" + "-" * 65)
-print("  Building CP-SAT model ...")
+model  = cp_model.CpModel()
 
-model = cp_model.CpModel()
+# Decision variables  x[(c,s,r,d,p)] ∈ {0,1}
+x = {
+    (c, s, r, d, p): model.NewBoolVar(f"x|{c}|{s}|{r}|{d}|{p}")
+    for c in classes
+    for s in subjects_of[c]
+    for r in rooms
+    for d in DAYS
+    for p in PERIODS
+}
+print(f"  Variables : {len(x):,}")
 
-# ── Decision variables x[(c, s, r, d, p)] in {0,1} ──────────────
-# Variables created ONLY for (c,s) pairs where s is in c's curriculum => C3 implicit
-x = {}
-for c in classes:
-    for s in subjects_of[c]:
-        for r in rooms:
-            for d in DAYS:
-                for p in PERIODS:
-                    x[(c, s, r, d, p)] = model.NewBoolVar(f"x|{c}|{s}|{r}|{d}|{p}")
-
-print(f"  Variables created : {len(x):,}")
-
-# ── C1 : A class has at most 1 session per (day, period) ─────────
+# C1 – class has at most 1 session per slot
 for c in classes:
     for d in DAYS:
         for p in PERIODS:
             model.Add(
-                sum(x[(c, s, r, d, p)]
+                sum(x[c,s,r,d,p]
                     for s in subjects_of[c]
                     for r in rooms) <= 1
             )
 
-# ── C2 : Each course scheduled exactly once per week ─────────────
+# C2 – each course scheduled exactly once
 for c in classes:
     for s in subjects_of[c]:
         model.Add(
-            sum(x[(c, s, r, d, p)]
+            sum(x[c,s,r,d,p]
                 for r in rooms
                 for d in DAYS
                 for p in PERIODS) == 1
         )
 
-# ── C4 : Each room used by at most 1 class per (day, period) ─────
+# C4 – room used by at most 1 class per slot
 for r in rooms:
     for d in DAYS:
         for p in PERIODS:
             model.Add(
-                sum(x[(c, s, r, d, p)]
+                sum(x[c,s,r,d,p]
                     for c in classes
                     for s in subjects_of[c]) <= 1
             )
 
-# ── C5 : Teacher conflict — same semester only ───────────────────
-# Rationale: S1 and S2 run at different times of the year, so a teacher
-# can teach INF121 (L1_S1) and INF122 (L1_S2) without conflict.
-# Within the same semester however, a teacher cannot teach two classes
-# at the same (day, period).
-# Also skip placeholder teachers (__UNKNOWN_N__) since they have no
-# real identity — each one represents a distinct, unknown lecturer.
+teacher_sem_groups = defaultdict(list)   # (teacher, semester) → [(c,s), …]
+for (c, s), t in teacher_of.items():
+    if not t.startswith("__TBD_"):
+        teacher_sem_groups[(t, semester(c))].append((c, s))
 
-# Group (class, subject) by (teacher, semester)
-teacher_sem_slots = defaultdict(list)  # (teacher, semester) -> [(c, s), ...]
-for (c, s), teacher in teacher_of.items():
-    if teacher.startswith("__UNKNOWN_"):
-        continue  # unique placeholder: no conflict possible
-    sem = get_semester(c)
-    teacher_sem_slots[(teacher, sem)].append((c, s))
-
-c5_constraints = 0
-for (teacher, sem), pairs in teacher_sem_slots.items():
-    if len(pairs) <= 1:
-        continue  # only one session this semester: no conflict possible
+c5_count = 0
+for (t, _sem), pairs in teacher_sem_groups.items():
+    if len(pairs) < 2:
+        continue
     for d in DAYS:
         for p in PERIODS:
             model.Add(
-                sum(x[(c, s, r, d, p)]
-                    for (c, s) in pairs
+                sum(x[c,s,r,d,p]
+                    for (c,s) in pairs
                     for r in rooms) <= 1
             )
-            c5_constraints += 1
+            c5_count += 1
 
-print(f"  Constraints added : C1, C2, C3 (implicit), C4, C5 ({c5_constraints} C5 constraints)")
+print(f"  Constraints : C1 + C2 + C3(implicit) + C4 + C5({c5_count})")
 
-# ── Objective : Maximize weighted morning sessions ────────────────
+# Objective
 model.Maximize(
-    sum(
-        WEIGHTS[p] * x[(c, s, r, d, p)]
+    sum(WEIGHTS[p] * x[c,s,r,d,p]
         for c in classes
         for s in subjects_of[c]
         for r in rooms
         for d in DAYS
-        for p in PERIODS
-    )
+        for p in PERIODS)
 )
-print("  Objective         : Maximize sum(w[p] * x[c,s,r,d,p])  (morning bias)")
+print("  Objective   : Maximise Σ w[p]·x  (morning sessions prioritised)")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. SOLVE
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# 5.  SOLVE
+# ─────────────────────────────────────────────────────────────────
 
 solver = cp_model.CpSolver()
-solver.parameters.max_time_in_seconds = 120.0
-solver.parameters.log_search_progress = False
+solver.parameters.max_time_in_seconds  = 120.0
+solver.parameters.log_search_progress  = False
 
-print("\n  Solving... (timeout: 120s)\n")
+print("\n  Solving … (timeout 120 s)\n")
 status = solver.Solve(model)
 
-STATUS_NAMES = {
+STATUS = {
     cp_model.OPTIMAL:    "OPTIMAL",
     cp_model.FEASIBLE:   "FEASIBLE",
     cp_model.INFEASIBLE: "INFEASIBLE",
     cp_model.UNKNOWN:    "UNKNOWN",
 }
-print(f"  Status          : {STATUS_NAMES.get(status, status)}")
+print(f"  Status  : {STATUS.get(status, status)}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. DISPLAY RESULTS
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# 6.  DISPLAY RESULTS
+# ─────────────────────────────────────────────────────────────────
 
 if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-    print(f"  Objective value : {solver.ObjectiveValue():.0f}")
-    print(f"  Wall time       : {solver.WallTime():.2f}s")
+    print(f"  Objective : {solver.ObjectiveValue():.0f}")
+    print(f"  Wall time : {solver.WallTime():.2f} s")
 
-    # Collect solution
     timetable = defaultdict(list)
     for c in classes:
         for s in subjects_of[c]:
             for r in rooms:
                 for d in DAYS:
                     for p in PERIODS:
-                        if solver.Value(x[(c, s, r, d, p)]) == 1:
-                            teacher = teacher_of[(c, s)]
-                            # Display UNKNOWN teachers as "TBD"
-                            display_teacher = "TBD" if teacher.startswith("__UNKNOWN_") else teacher
+                        if solver.Value(x[c,s,r,d,p]):
+                            t = teacher_of[(c,s)]
                             timetable[c].append({
                                 "code":        s,
                                 "room":        r,
-                                "day":         DAY_NAMES[d],
-                                "day_idx":     d,
-                                "period":      PERIOD_NAMES[p],
-                                "period_idx":  p,
-                                "teacher":     display_teacher,
+                                "day":         DAY_NAMES[d],  "di": d,
+                                "period":      PERIOD_NAMES[p], "pi": p,
+                                "teacher":     "TBD" if t.startswith("__TBD_") else t,
                                 "before_noon": p < 2,
                             })
 
-    SEP  = "-" * 80
-    SEP2 = "=" * 80
-
+    W  = "-" * 82
+    W2 = "=" * 82
     for c in sorted(timetable.keys()):
-        entries = sorted(timetable[c], key=lambda e: (e["day_idx"], e["period_idx"]))
-        print(f"\n{SEP2}")
-        print(f"  TIMETABLE  -  {c}   ({len(entries)} sessions)")
-        print(SEP2)
-        print(f"  {'DAY':<12} {'PERIOD':<18} {'COURSE':<12} {'ROOM':<8} {'TEACHER'}")
-        print(SEP)
+        entries = sorted(timetable[c], key=lambda e: (e["di"], e["pi"]))
+        print(f"\n{W2}\n  {c}  ({len(entries)} sessions)\n{W2}")
+        print(f"  {'DAY':<12} {'PERIOD':<18} {'COURSE':<12} {'ROOM':<8} TEACHER")
+        print(W)
         for e in entries:
-            tag = "  [before noon]" if e["before_noon"] else ""
+            tag = "  <- before noon" if e["before_noon"] else ""
             print(f"  {e['day']:<12} {e['period']:<18} {e['code']:<12} {e['room']:<8} {e['teacher']}{tag}")
-        print(SEP)
+        print(W)
 
-    # Statistics
-    total        = sum(len(v) for v in timetable.values())
-    before_noon  = sum(1 for v in timetable.values() for e in v if e["before_noon"])
-    pct          = (100 * before_noon // total) if total else 0
-
-    print(f"\n{SEP2}")
-    print("  STATISTICS")
-    print(SEP2)
-    print(f"  Total sessions scheduled : {total}")
-    print(f"  Sessions before noon     : {before_noon} / {total}  ({pct}%)")
-    print(f"  Classes with timetable   : {len(timetable)}")
-    print(f"  Rooms available          : {len(rooms)}")
-    print(f"{SEP2}\n")
+    total  = sum(len(v) for v in timetable.values())
+    bn     = sum(1 for v in timetable.values() for e in v if e["before_noon"])
+    pct    = 100*bn//total if total else 0
+    print(f"\n{W2}\n  STATISTICS\n{W2}")
+    print(f"  Total sessions   : {total}")
+    print(f"  Before noon      : {bn}/{total}  ({pct}%)")
+    print(f"  Classes covered  : {len(timetable)}\n{W2}\n")
 
 else:
-    print("\n  [!] No feasible solution found.")
-    print("  Diagnostics:")
-    total_courses = sum(len(v) for v in subjects_of.values())
-    max_slots = len(DAYS) * len(PERIODS) * len(rooms)
-    print(f"   - Total courses to schedule : {total_courses}")
-    print(f"   - Total available slots     : {max_slots}  ({len(DAYS)} days x {len(PERIODS)} periods x {len(rooms)} rooms)")
-    if total_courses > max_slots:
-        print("   => Not enough slots! Add more rooms or days.")
-    print("   - Try increasing max_time_in_seconds\n")
+    total  = sum(len(v) for v in subjects_of.values())
+    slots  = len(rooms) * len(DAYS) * len(PERIODS)
+    print(f"\n  [!] No feasible solution found.")
+    print(f"  Courses to schedule : {total}")
+    print(f"  Available slots     : {slots}  "
+          f"({len(rooms)} rooms × {len(DAYS)} days × {len(PERIODS)} periods)")
